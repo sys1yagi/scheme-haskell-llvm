@@ -1,67 +1,24 @@
 {-# LANGUAGE ExistentialQuantification #-}
 
 module Main where
+
 import System.Environment
+import System.IO hiding (try)
 import Text.ParserCombinators.Parsec hiding (spaces)
 import Control.Monad
-
-import Syntax
 import Control.Monad.Error
 
-import System.IO hiding (try)
+import Lexer
+import Syntax
+import Codegen
+import Emit
+
+import qualified LLVM.General.AST as AST
+
 
 instance Show LispVal where show = showVal
 
-spaces :: Parser ()
-spaces = skipMany1 space
-
-symbol :: Parser Char
-symbol = oneOf "!#$%&|*+-/:<=>?@^_~"
-
-parseString :: Parser LispVal
-parseString = do    char '"'
-                    x <- many (noneOf "\"")
-                    char '"'
-                    return $ String x
-
-parseAtom :: Parser LispVal
-parseAtom = do  first <- letter <|> symbol
-                rest <- many (letter <|> digit <|> symbol)
-                let atom = first:rest
-                return $ case atom of 
-                    "#t" -> Bool True
-                    "#f" -> Bool False
-                    _ -> Atom atom
-
-parseNumber :: Parser LispVal
-parseNumber = liftM (Number . read) $ many1 digit
-
-
-parseList :: Parser LispVal
-parseList = liftM List $ sepBy parseExpr spaces
-
-parseDottedList :: Parser LispVal
-parseDottedList = do
-                head <- endBy parseExpr spaces
-                tail <- char '.' >> spaces >> parseExpr
-                return $ DottedList head tail
-
-parseQuoted :: Parser LispVal
-parseQuoted = do
-   char '\''
-   x <- parseExpr
-   return $ List [Atom "quote", x]
-
-parseExpr = parseAtom
-            <|> parseString
-            <|> parseNumber
-            <|> parseQuoted
-            <|> do  char '('
-                    x <- try parseList <|> parseDottedList
-                    char ')'
-                    return x
-
--- toString()
+-- toString
 showVal :: LispVal -> String
 showVal (String contents) = "\"" ++ contents ++ "\""
 showVal (Atom name) = name
@@ -123,10 +80,10 @@ primitives :: [(String, [LispVal] -> ThrowsError LispVal)]
 primitives = [("+", numericBinop (+)),
               ("-", numericBinop (-)),
               ("*", numericBinop (*)),
-              ("/", numericBinop div),
-              ("mod", numericBinop mod),
-              ("quotient", numericBinop quot),
-              ("remainder", numericBinop rem),
+              ("/", numericBinop (/)),
+              --("mod", numericBinop mod),
+              --("quotient", numericBinop quot),
+              --("remainder", numericBinop rem),
               ("=", numBoolBinop (==)),
               ("<", numBoolBinop (<)),
               (">", numBoolBinop (>)),
@@ -148,11 +105,11 @@ primitives = [("+", numericBinop (+)),
               ("equal?", equal)
               ]
 
-numericBinop :: (Integer -> Integer -> Integer) -> [LispVal] -> ThrowsError LispVal
+numericBinop :: (Double -> Double -> Double) -> [LispVal] -> ThrowsError LispVal
 numericBinop op singleVal@[_] = throwError $ NumArgs 2 singleVal
 numericBinop op params = mapM unpackNum params >>= return . Number . foldl1 op
  
-unpackNum :: LispVal -> ThrowsError Integer
+unpackNum :: LispVal -> ThrowsError Double
 unpackNum (Number n) = return n
 unpackNum (String n) = let parsed = reads n in 
                           if null parsed 
@@ -258,16 +215,33 @@ until_ pred prompt action = do
 runRepl :: IO ()
 runRepl = until_ (== "quit") (readPrompt "Scheme?>>> ") evalAndPrint
 
--- parse
-
 readExpr :: String -> ThrowsError LispVal
 readExpr input = case parse parseExpr "scheme?" input of
     Left err -> throwError $ Parser err
     Right val -> return val
+
+-- compile 
+
+initModule :: AST.Module
+initModule = emptyModule "scheme?"
+
+process ::   AST.Module -> String -> IO (Maybe AST.Module)
+process modo source = do
+  let res = parse parseExpr "scheme?" source
+  case res of
+    Left err -> print err >> return Nothing
+    Right ex -> do
+      ast <- codegen modo [ex]
+      return $ Just ast
+
+processFile :: String -> IO (Maybe AST.Module)
+processFile fname = readFile fname >>= process initModule
+
+-- main
 
 main :: IO()
 main = do
   args <- getArgs
   case args of
     [] -> runRepl
-    _ -> putStrLn "error."
+    [fname] -> processFile fname >> return ()
